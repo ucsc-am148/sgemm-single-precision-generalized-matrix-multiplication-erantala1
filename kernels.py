@@ -257,6 +257,7 @@ def sgemm_2d_tile(A, B, C, M, N, K):
     For accumulators, use cuda.local.array((TM5, TN5), float32).
     Numba supports tuple-shaped local arrays!
     """
+    # 2D array for each thread now
     thread_results = cuda.local.array((TM5, TN5), float32)
     for i in range(TM5):
         for j in range(TN5):
@@ -264,55 +265,88 @@ def sgemm_2d_tile(A, B, C, M, N, K):
 
     tid = cuda.threadIdx.x
 
+    # inner thread indices
     num_thread_cols = BN5 // TN5
-
     thread_row = tid // num_thread_cols
     thread_col = tid % num_thread_cols
 
+    # global block indices
     block_row = cuda.blockIdx.y * BM5
     block_col = cuda.blockIdx.x * BN5
 
+    # global C indices, now TM5 rows and TN5 cols per thread
     c_row_start = block_row + thread_row * TM5
     c_col_start = block_col + thread_col * TN5
 
+    # same as before
     As = cuda.shared.array((BM5, BK5), float32)
     Bs = cuda.shared.array((BK5, BN5), float32)
+
+    # num threads total
     num_threads = (BM5 * BN5) // (TM5 * TN5)
-    
+
+    # number of elements each thread loads into As and Bs per tile
+    num_a_elem = (BM5 * BK5) // num_threads
+    num_b_elem = (BK5 * BN5) // num_threads
+
+    # row strides for repeated per-thread loads
+    A_row_stride = num_threads // BK5
+    B_row_stride = num_threads // BN5
+
+    # base sm load coordinates for this thread
+    A_load_row = tid // BK5
+    A_load_col = tid % BK5
+
+    b_load_row = tid // BN5
+    B_load_col = tid % BN5
+
     for blk_idx in range(0, K, BK5):
-        for load_idx in range(tid, BM5 * BK5, num_threads):
-            as_row = load_idx // BK5
-            as_col = load_idx % BK5
 
-            a_row = block_row + as_row
-            a_col = blk_idx + as_col
+        # load As (BM5 x BK5)
+        for i in range(num_a_elem):
 
-            if a_row < M and a_col < K:
-                As[as_row, as_col] = A[a_row, a_col]
+            # move to indices within block
+            As_row = A_load_row + i * A_row_stride
+            As_col = A_load_col
+
+            A_row = block_row + As_row
+            A_col = blk_idx + As_col
+
+            if A_row < M and A_col < K:
+                As[As_row, As_col] = A[A_row, A_col]
             else:
-                As[as_row, as_col] = float32(0.0)
+                As[As_row, As_col] = float32(0.0)
 
-        for load_idx in range(tid, BK5 * BN5, num_threads):
-            bs_row = load_idx // BN5
-            bs_col = load_idx % BN5
+        # Load B tile: Bs is BK5 x BN5
+        for i in range(num_b_elem):
 
-            b_row = blk_idx + bs_row
-            b_col = block_col + bs_col
+            # move to indices within block
+            Bs_row = b_load_row + i * B_row_stride
+            Bs_col = B_load_col
 
-            if b_row < K and b_col < N:
-                Bs[bs_row, bs_col] = B[b_row, b_col]
+            B_row = blk_idx + Bs_row
+            B_col = block_col + Bs_col
+
+            if B_row < K and B_col < N:
+                Bs[Bs_row, Bs_col] = B[B_row, B_col]
             else:
-                Bs[bs_row, bs_col] = float32(0.0)
+                Bs[Bs_row, Bs_col] = float32(0.0)
 
         cuda.syncthreads()
 
         for dotIdx in range(BK5):
+            # cache A row and B col
+            reg_a = cuda.local.array(TM5, dtype=float32)
+            reg_b = cuda.local.array(TN5, dtype=float32)
+
             for i in range(TM5):
-                a_val = As[thread_row * TM5 + i, dotIdx]
+                reg_a[i] = As[thread_row * TM5 + i, dotIdx]
+            for j in range(TN5):
+                reg_b[j] = Bs[dotIdx, thread_col * TN5 + j]
+
+            for i in range(TM5):
                 for j in range(TN5):
-                    thread_results[i, j] += (
-                        a_val * Bs[dotIdx, thread_col * TN5 + j]
-                    )
+                    thread_results[i, j] += reg_a[i] * reg_b[j]
 
         cuda.syncthreads()
 
