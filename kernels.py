@@ -277,9 +277,10 @@ def sgemm_2d_tile(A, B, C, M, N, K):
 
     As = cuda.shared.array((BM5, BK5), float32)
     Bs = cuda.shared.array((BK5, BN5), float32)
-
+    num_threads = (BM5 * BN5) // (TM5 * TN5)
+    
     for blk_idx in range(0, K, BK5):
-        for load_idx in range(tid, BM5 * BK5, cuda.blockDim.x):
+        for load_idx in range(tid, BM5 * BK5, num_threads):
             as_row = load_idx // BK5
             as_col = load_idx % BK5
 
@@ -291,7 +292,7 @@ def sgemm_2d_tile(A, B, C, M, N, K):
             else:
                 As[as_row, as_col] = float32(0.0)
 
-        for load_idx in range(tid, BK5 * BN5, cuda.blockDim.x):
+        for load_idx in range(tid, BK5 * BN5, num_threads):
             bs_row = load_idx // BN5
             bs_col = load_idx % BN5
 
