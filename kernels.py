@@ -258,9 +258,6 @@ def sgemm_2d_tile(A, B, C, M, N, K):
     Numba supports tuple-shaped local arrays!
     """
     thread_results = cuda.local.array((TM5, TN5), float32)
-    regM = cuda.local.array((TM5,), float32)
-    regN = cuda.local.array((TN5,), float32)
-
     for i in range(TM5):
         for j in range(TN5):
             thread_results[i, j] = float32(0.0)
@@ -282,7 +279,6 @@ def sgemm_2d_tile(A, B, C, M, N, K):
     Bs = cuda.shared.array((BK5, BN5), float32)
 
     for blk_idx in range(0, K, BK5):
-
         for load_idx in range(tid, BM5 * BK5, cuda.blockDim.x):
             as_row = load_idx // BK5
             as_col = load_idx % BK5
@@ -311,14 +307,11 @@ def sgemm_2d_tile(A, B, C, M, N, K):
 
         for dotIdx in range(BK5):
             for i in range(TM5):
-                regM[i] = As[thread_row * TM5 + i, dotIdx]
-
-            for j in range(TN5):
-                regN[j] = Bs[dotIdx, thread_col * TN5 + j]
-
-            for i in range(TM5):
+                a_val = As[thread_row * TM5 + i, dotIdx]
                 for j in range(TN5):
-                    thread_results[i, j] += regM[i] * regN[j]
+                    thread_results[i, j] += (
+                        a_val * Bs[dotIdx, thread_col * TN5 + j]
+                    )
 
         cuda.syncthreads()
 
